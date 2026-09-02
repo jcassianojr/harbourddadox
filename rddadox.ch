@@ -147,7 +147,7 @@
             [<ex: EXCLUSIVE>] [<sh: SHARED>] [<ro: READONLY>] ;
             [CODEPAGE <cp>] [INDEX <(index1)> [, <(indexN)>]] ;
             [ TABLE <cTable> ] ;
-            [ <dbEngine: ACCESS, MDB, MDB64, DBASE, PARADOX, MYSQL, MYSQL64, MARIADB, PGSQL, POSTGRESQL, PGSQL64, ORACLE, OCI, INFORMIX, SQL, MSSQL, SQLSERVER, SQLITE, ACEOLEDB, ACCDB, ACCDB64, FIREBIRD> ];
+            [ <dbEngine: ACCESS, MDB, MDB64, ACCESS64, ACCDB, ACCDB64, ACEOLEDB, DBASE, PARADOX, MYSQL, MYSQL64, MARIADB, PGSQL, POSTGRESQL, PGSQL64, ORACLE, OCI, INFORMIX, SQL, MSSQL, SQLSERVER, SQLITE, DUCKDB, FIREBIRD, FDB, GDB, IB, XLS> ];
             [ FROM <cServer> ] ;
             [ QUERY <cQuery> ] ;
             [ USER <cUser> PASSWORD <cPassword> ]=> ;
