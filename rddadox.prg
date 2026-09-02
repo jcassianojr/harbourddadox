@@ -38,6 +38,9 @@
 #define UR_TRANSBEGIN     51
 #define UR_TRANSCOMMIT    52
 #define UR_TRANSROLLBACK  53
+#define UR_GETROW         54
+#define UR_GETROWBLANK    55
+#define UR_PUTROW         56
 
 ANNOUNCE RDDADOX
 
@@ -1872,6 +1875,9 @@ FUNCTION RDDADOX_GETFUNCTABLE( pFuncCount, pFuncTable, pSuperTable, nRddID )
    aADOFunc[ UR_TRANSBEGIN ]    := @ADO_TRANSBEGIN()
    aADOFunc[ UR_TRANSCOMMIT ]   := @ADO_TRANSCOMMIT()
    aADOFunc[ UR_TRANSROLLBACK ] := @ADO_TRANSROLLBACK()
+   aADOFunc[ UR_GETROW      ] := @ADO_GETROW()
+   aADOFunc[ UR_GETROWBLANK ] := @ADO_GETROWBLANK()
+   aADOFunc[ UR_PUTROW      ] := @ADO_PUTROW()
 
    RETURN USRRDD_GETFUNCTABLE( pFuncCount, pFuncTable, pSuperTable, nRddID, ;
       /* NO SUPER RDD */,aADOFunc)
@@ -2675,3 +2681,94 @@ STATIC FUNCTION ADO_LOAD_INDEXES( oConn, cTableName )
    RECOVER
    END SEQUENCE
    RETURN aIndexes
+   
+   
+   // +--------------------------------------------------------------------
+// +    Static Functions: GETROW, GETROWBLANK e PUTROW
+// +    Manipulação direta de registros via Array tipado
+// +--------------------------------------------------------------------
+
+STATIC FUNCTION ADO_GETROW( nWA )
+   LOCAL aWAData    := USRRDD_AREADATA( nWA )
+   LOCAL oRecordSet := aWAData[ WA_RECORDSET ]
+   LOCAL nTotalFld  := oRecordSet:Fields:Count
+   LOCAL aRow       := Array( nTotalFld )
+   LOCAL i, xVal
+
+   IF aWAData[ WA_EOF ] .OR. oRecordSet:EOF .OR. oRecordSet:BOF
+      RETURN ADO_GETROWBLANK( nWA )
+   ENDIF
+
+   FOR i := 1 TO nTotalFld
+      xVal := oRecordSet:Fields( i - 1 ):Value
+      IF ValType( xVal ) == "U"
+         DO CASE
+         CASE ADO_GETFIELDTYPE( oRecordSet:Fields( i - 1 ):Type ) == HB_FT_STRING
+            xVal := Space( oRecordSet:Fields( i - 1 ):DefinedSize )
+         CASE ADO_GETFIELDTYPE( oRecordSet:Fields( i - 1 ):Type ) == HB_FT_DATE
+            xVal := hb_SToD()
+         CASE ADO_GETFIELDTYPE( oRecordSet:Fields( i - 1 ):Type ) == HB_FT_TIMESTAMP
+            xVal := hb_SToD()
+         CASE ADO_GETFIELDTYPE( oRecordSet:Fields( i - 1 ):Type ) == HB_FT_LOGICAL
+            xVal := .F.
+         OTHERWISE
+            xVal := 0
+         ENDCASE
+      ENDIF
+      aRow[ i ] := xVal
+   NEXT i
+
+   RETURN aRow
+
+STATIC FUNCTION ADO_GETROWBLANK( nWA )
+   LOCAL aWAData    := USRRDD_AREADATA( nWA )
+   LOCAL oRecordSet := aWAData[ WA_RECORDSET ]
+   LOCAL nTotalFld  := oRecordSet:Fields:Count
+   LOCAL aRow       := Array( nTotalFld )
+   LOCAL i, nType
+
+   FOR i := 1 TO nTotalFld
+      nType := ADO_GETFIELDTYPE( oRecordSet:Fields( i - 1 ):Type )
+      DO CASE
+      CASE nType == HB_FT_STRING
+         aRow[ i ] := Space( oRecordSet:Fields( i - 1 ):DefinedSize )
+      CASE nType == HB_FT_LOGICAL
+         aRow[ i ] := .F.
+      CASE nType == HB_FT_DATE .OR. nType == HB_FT_TIMESTAMP
+         aRow[ i ] := hb_SToD()
+      CASE nType == HB_FT_INTEGER .OR. nType == HB_FT_LONG .OR. nType == HB_FT_DOUBLE
+         aRow[ i ] := 0
+      CASE nType == HB_FT_MEMO .OR. nType == HB_FT_OLE
+         aRow[ i ] := ""
+      OTHERWISE
+         aRow[ i ] := ""
+      ENDCASE
+   NEXT i
+
+   RETURN aRow
+
+STATIC FUNCTION ADO_PUTROW( nWA, aRow )
+   LOCAL aWAData    := USRRDD_AREADATA( nWA )
+   LOCAL oRecordSet := aWAData[ WA_RECORDSET ]
+   LOCAL nTotalFld  := oRecordSet:Fields:Count
+   LOCAL i
+
+   IF aWAData[ WA_EOF ] .OR. oRecordSet:EOF
+      RETURN HB_FAILURE
+   ENDIF
+
+   IF ValType( aRow ) != "A" .OR. Len( aRow ) < nTotalFld
+      RETURN HB_FAILURE
+   ENDIF
+
+   BEGIN SEQUENCE WITH {| oErr | Break( oErr ) }
+      FOR i := 1 TO nTotalFld
+         IF !( oRecordSet:Fields( i - 1 ):Value == aRow[ i ] )
+            oRecordSet:Fields( i - 1 ):Value := aRow[ i ]
+         ENDIF
+      NEXT i
+   RECOVER
+      RETURN HB_FAILURE
+   END SEQUENCE
+
+   RETURN HB_SUCCESS
