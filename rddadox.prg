@@ -504,15 +504,21 @@ STATIC FUNCTION ADO_GETVALUE( nWA, nField, xValue )
             xValue := ""
          ENDCASE
       ELSE
+         // Filtro Inteligente para Campos Lógicos
+         IF nType == HB_FT_LOGICAL .AND. ValType( xValue ) != "L"
+            xValue := strlogicrdd( hb_ValToStr( xValue ), .F. )
+         // Filtro Inteligente para Campos de Data (Garante conversão via StrDateRdd se vier como string/timestamp irregular)
+         ELSEIF  nType == HB_FT_DATE   .AND. ValType( xValue ) != "D"
+            xValue := StrDateRdd( xValue )   
+         
          // Tratamento de tamanho para String válida
-         IF nType == HB_FT_STRING
+         ELSEIF nType == HB_FT_STRING
             xValue := PadR( xValue, rs:Fields( nField - 1 ):DefinedSize )
          ENDIF
       ENDIF
    ENDIF
 
    RETURN HB_SUCCESS
-
 
 // +--------------------------------------------------------------------
 // +
@@ -847,23 +853,54 @@ STATIC FUNCTION ADO_RECCOUNT( nWA, nRecords )
 STATIC FUNCTION ADO_PUTVALUE( nWA, nField, xValue )
    LOCAL aWAData    := USRRDD_AREADATA( nWA )
    LOCAL oRecordSet := aWAData[ WA_RECORDSET ]
-   LOCAL oStream, nType
+   LOCAL oField     := oRecordSet:Fields( nField - 1 )
+   LOCAL nType      := oField:Type
+   LOCAL oStream
 
-   IF !aWAData[ WA_EOF ] .AND. !( oRecordSet:Fields( nField - 1 ):Value == xValue )
-      nType := oRecordSet:Fields( nField - 1 ):Type
-      
-      // Se for Binário ou Memo Extenso (adLongVarBinary, adLongVarChar)
-      //IF nType == 201 .OR. nType == 203 .OR. nType == 205 .OR. nType == 128
+   IF aWAData[ WA_EOF ] .OR. oRecordSet:EOF
+      RETURN HB_SUCCESS
+   ENDIF
+
+   // 1. Tratamento inteligente para campos Lógicos (.T. / .F.)
+   IF ValType( xValue ) == "L"
+     DO CASE
+      CASE nType == adBoolean
+         // Mantém o booleano nativo (.T. / .F.) para SGBDs que suportam
+         
+      CASE nType == adSmallInt .OR. nType == adInteger .OR. nType == adTinyInt .OR. nType == adBigInt .OR. nType == adNumeric
+         // Motores que mapeiam lógico como numérico (Oracle, Firebird, etc.)
+         xValue := iif( xValue, 1, 0 )
+         
+      CASE nType == adChar .OR. adVarChar $ Str( nType )
+         // Motores que mapeiam lógico como caractere
+         IF cEngine == "PGSQL" .OR. cEngine == "POSTGRESQL"
+            xValue := iif( xValue, "true", "false" )
+         ELSE
+            xValue := iif( xValue, "T", "F" )
+         ENDIF
+      OTHERWISE
+         xValue := iif( xValue, 1, 0 )
+      ENDCASE
+
+   // 2. Tratamento inteligente para Datas (D)
+   ELSEIF ValType( xValue ) == "D"
+      IF Empty( xValue )
+         xValue := NIL // Converte data vazia do Harbour em NULL para o banco evitar erro de range
+      ENDIF
+   ENDIF
+
+   // 3. Atribuição segura ao Recordset com suporte a Streams (Memo/Binário)
+   IF !( oField:Value == xValue )
       IF nType == adLongVarChar .OR. nType == adLongVarWChar .OR. nType == adLongVarBinary .OR. nType == adBinary
          oStream := win_oleCreateObject( "ADODB.Stream" )
          oStream:Type := 1 // adTypeBinary
          oStream:Open()
          oStream:Write( xValue )
          oStream:Position := 0
-         oRecordSet:Fields( nField - 1 ):Value := oStream:Read()
+         oField:Value := oStream:Read()
          oStream:Close()
       ELSE
-         oRecordSet:Fields( nField - 1 ):Value := xValue
+         oField:Value := xValue
       ENDIF
    ENDIF
 
@@ -2890,3 +2927,115 @@ STATIC FUNCTION ADO_PUTROW( nWA, aRow )
    END SEQUENCE
 
    RETURN HB_SUCCESS
+   
+   
+   // +--------------------------------------------------------------------
+// +
+// +    Static Function strlogicrdd( cVAL, lDEFAULT )
+// +    Conversor universal de retornos textuais/numéricos para Booleano
+// +
+// +--------------------------------------------------------------------
+STATIC FUNCTION strlogicrdd( cVAL, lDEFAULT )
+
+   IF ValType( lDEFAULT ) <> "L"
+      lDEFAULT := .F.
+   ENDIF
+   
+   SWITCH Upper( cVal )
+   CASE ".T."
+   CASE "TRUE"
+   CASE "YES"
+   CASE "SIM"
+   CASE "ON"
+   CASE "Y"
+   CASE "1"
+   CASE "T"
+   CASE "S"
+      RETURN .T.
+   CASE ".F."
+   CASE "FALSE"
+   CASE "NO"
+   CASE "NAO"
+   CASE "OFF"
+   CASE "N"
+   CASE "0"
+   CASE "F"
+   CASE "<NULL>"
+   CASE "NULL"
+   CASE "NUL"
+   CASE "NIL"
+      RETURN .F.
+   ENDSWITCH
+
+   RETURN lDEFAULT
+   
+   
+   // +--------------------------------------------------------------------
+// +    Static Function StrDateRdd( xData )
+// +    Conversor inteligente de datas universal para o RDD ADO
+// +--------------------------------------------------------------------
+STATIC FUNCTION StrDateRdd( xData )
+   LOCAL dRet := CToD( "" )
+   LOCAL cTemp, aParts, cAno, cMes, cDia, nAno
+
+   IF ValType( xData ) == "D"
+      RETURN xData
+   ENDIF
+
+   IF ValType( xData ) <> "C" .OR. Empty( xData ) .OR. xData == "NULL"
+      RETURN dRet
+   ENDIF
+
+   xData := AllTrim( xData )
+
+   cTemp := StrTran( xData, "-", "/" )
+   cTemp := StrTran( cTemp, ".", "/" )
+
+   aParts := hb_ATokens( cTemp, "/" )
+
+   IF Len( aParts ) == 3
+      IF Len( aParts[ 1 ] ) == 4
+         cAno := aParts[ 1 ]
+         cMes := StrZero( Val( aParts[ 2 ] ), 2 )
+         cDia := StrZero( Val( aParts[ 3 ] ), 2 )
+      ELSE
+         cDia := StrZero( Val( aParts[ 1 ] ), 2 )
+         cMes := StrZero( Val( aParts[ 2 ] ), 2 )
+         cAno := aParts[ 3 ]
+         
+         IF Len( cAno ) == 2
+            nAno := Val( cAno )
+            IF nAno < 50
+               cAno := "20" + cAno
+            ELSE
+               cAno := "19" + cAno
+            ENDIF
+         ENDIF
+      ENDIF
+      
+      IF cAno + cMes + cDia == "00000000"
+         RETURN dRet
+      ENDIF
+      
+      RETURN SToD( cAno + cMes + cDia )
+   ELSE
+      IF Len( cTemp ) == 8
+         IF Val( Left( cTemp, 4 ) ) > 1900
+            dRet := SToD( cTemp )
+         ELSE
+            dRet := SToD( Right( cTemp, 4 ) + SubStr( cTemp, 3, 2 ) + Left( cTemp, 2 ) )
+         ENDIF
+      ELSEIF Len( cTemp ) == 6
+         nAno := Val( Right( cTemp, 2 ) )
+         IF nAno < 50
+            cAno := "20" + Right( cTemp, 2 )
+         ELSE
+            cAno := "19" + Right( cTemp, 2 )
+         ENDIF
+         dRet := SToD( cAno + SubStr( cTemp, 3, 2 ) + Left( cTemp, 2 ) )
+      ELSE
+         dRet := CToD( xData )
+      ENDIF
+   ENDIF
+
+   RETURN dRet
