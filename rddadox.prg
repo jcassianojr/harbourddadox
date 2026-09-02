@@ -1905,10 +1905,85 @@ FUNCTION RDDADOX_GETFUNCTABLE( pFuncCount, pFuncTable, pSuperTable, nRddID )
    aADOFunc[ UR_GETROW      ] := @ADO_GETROW()
    aADOFunc[ UR_GETROWBLANK ] := @ADO_GETROWBLANK()
    aADOFunc[ UR_PUTROW      ] := @ADO_PUTROW()
+   aADOFunc[ UR_INFO ]         := @ADO_INFO()
+   aADOFunc[ UR_RDDINFO ]      := @ADO_RDDINFO()
 
    RETURN USRRDD_GETFUNCTABLE( pFuncCount, pFuncTable, pSuperTable, nRddID, ;
       /* NO SUPER RDD */,aADOFunc)
 
+// +--------------------------------------------------------------------
+// +
+// +    Static Function ADO_RDDINFO()
+// +    Retorna informações globais do RDD (como extensões padrão)
+// +
+// +--------------------------------------------------------------------
+STATIC FUNCTION ADO_RDDINFO( nIndex, cargo )
+   LOCAL xRet := NIL
+
+   DO CASE
+      CASE nIndex == RDDI_TABLEEXT
+         // Mapeamento dinâmico da extensão baseado no Engine em uso
+         DO CASE
+         CASE t_cEngine == "MDB" .OR. t_cEngine == "ACCESS" .OR. t_cEngine == "MDB64" .OR. t_cEngine == "ACCESS64"
+            xRet := ".mdb"
+         CASE t_cEngine == "ACCDB" .OR. t_cEngine == "ACCDB64" //.OR. t_cEngine == "ACEOLEDB"
+            xRet := ".accdb"
+         CASE t_cEngine == "SQLITE"
+            xRet := ".sqlite"
+         CASE t_cEngine == "PARADOX"
+            xRet := ".db"
+         CASE t_cEngine == "FIREBIRD" .OR. t_cEngine == "FDB" 
+            xRet := ".fdb"
+         CASE t_cEngine == "GDB" 
+            xRet := ".gdb"
+         CASE t_cEngine == "IB"
+            xRet := ".ib" 
+         CASE t_cEngine == "XLS"
+            xRet := ".xls"
+         CASE t_cEngine == "DUCKDB"
+            xRet := ".duckdb"
+         CASE t_cEngine == "DUCKLAKE"
+            xRet := ".ducklake"    
+         OTHERWISE
+            xRet := "" // Bancos Client-Server (MySQL, Postgres, SQL Server) não possuem extensão de tabela local
+         ENDCASE
+
+      CASE nIndex == RDDI_MEMOEXT
+         xRet := "" 
+         
+      CASE nIndex == RDDI_ORDBAGEXT
+         xRet := "" 
+         
+      OTHERWISE
+         xRet := UR_SUPER_RDDINFO( nIndex, cargo )
+   ENDCASE
+
+   RETURN xRet
+
+// +--------------------------------------------------------------------
+// +
+// +    Static Function ADO_INFO()
+// +    Retorna informações da Área de Trabalho (WorkArea) atual
+// +
+// +--------------------------------------------------------------------
+STATIC FUNCTION ADO_INFO( nWA, nIndex, cargo )
+   LOCAL xRet := NIL
+
+   DO CASE
+      CASE nIndex == DBI_ISDBF
+         // Informa explicitamente ao Harbour que esta RDD NÃO é DBF
+         xRet := .F.
+      CASE nIndex == DBI_CANPUTREC
+         // Informa que a RDD suporta gravação
+         xRet := .T.
+      CASE nIndex == DBI_ISANSI
+         // Bancos relacionais modernos usam padrões ANSI/UTF
+         xRet := .T.
+      OTHERWISE
+         xRet := UR_SUPER_INFO( nWA, nIndex, cargo )
+   ENDCASE
+
+   RETURN xRet
 
 // +--------------------------------------------------------------------
 // +
