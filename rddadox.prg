@@ -467,33 +467,46 @@ STATIC FUNCTION ADO_CLOSE( nWA )
 // +
 // +
 STATIC FUNCTION ADO_GETVALUE( nWA, nField, xValue )
-
    LOCAL aWAData := USRRDD_AREADATA( nWA )
-   LOCAL rs      := USRRDD_AREADATA( nWA )[ WA_RECORDSET ]
+   LOCAL rs      := aWAData[ WA_RECORDSET ]
+   LOCAL nType
 
    IF aWAData[ WA_EOF ] .OR. rs:EOF .OR. rs:BOF
       xValue := NIL
-      IF ADO_GETFIELDTYPE( rs:Fields( nField - 1 ) :Type ) == HB_FT_STRING
-         xValue := Space( rs:Fields( nField - 1 ) :DefinedSize )
-      ENDIF
+      nType := ADO_GETFIELDTYPE( rs:Fields( nField - 1 ):Type )
+      DO CASE
+      CASE nType == HB_FT_STRING
+         xValue := Space( rs:Fields( nField - 1 ):DefinedSize )
+      CASE nType == HB_FT_DATE .OR. nType == HB_FT_TIMESTAMP
+         xValue := hb_SToD()
+      CASE nType == HB_FT_LOGICAL
+         xValue := .F.
+      CASE nType == HB_FT_INTEGER .OR. nType == HB_FT_LONG .OR. nType == HB_FT_DOUBLE
+         xValue := 0
+      OTHERWISE
+         xValue := ""
+      ENDCASE
    ELSE
-      xValue := rs:Fields( nField - 1 ) :Value
+      xValue := rs:Fields( nField - 1 ):Value
+      nType  := ADO_GETFIELDTYPE( rs:Fields( nField - 1 ):Type )
 
-      IF ADO_GETFIELDTYPE( rs:Fields( nField - 1 ) :Type ) == HB_FT_STRING
-         IF ValType( xValue ) == "U"
-            xValue := Space( rs:Fields( nField - 1 ) :DefinedSize )
-         ELSE
-            xValue := PadR( xValue, rs:Fields( nField - 1 ) :DefinedSize )
-         ENDIF
-      ELSEIF ADO_GETFIELDTYPE( rs:Fields( nField - 1 ) :Type ) == HB_FT_DATE
-         /* Null values */
-         IF ValType( xValue ) == "U"
+      IF ValType( xValue ) == "U" // Retorno NULL do Banco de Dados
+         DO CASE
+         CASE nType == HB_FT_STRING
+            xValue := Space( rs:Fields( nField - 1 ):DefinedSize )
+         CASE nType == HB_FT_DATE .OR. nType == HB_FT_TIMESTAMP
             xValue := hb_SToD()
-         ENDIF
-      ELSEIF ADO_GETFIELDTYPE( rs:Fields( nField - 1 ) :Type ) == HB_FT_TIMESTAMP
-         /* Null values */
-         IF ValType( xValue ) == "U"
-            xValue := hb_SToD()
+         CASE nType == HB_FT_LOGICAL
+            xValue := .F.
+         CASE nType == HB_FT_INTEGER .OR. nType == HB_FT_LONG .OR. nType == HB_FT_DOUBLE
+            xValue := 0
+         OTHERWISE
+            xValue := ""
+         ENDCASE
+      ELSE
+         // Tratamento de tamanho para String válida
+         IF nType == HB_FT_STRING
+            xValue := PadR( xValue, rs:Fields( nField - 1 ):DefinedSize )
          ENDIF
       ENDIF
    ENDIF
@@ -832,18 +845,26 @@ STATIC FUNCTION ADO_RECCOUNT( nWA, nRecords )
 // +
 // +
 STATIC FUNCTION ADO_PUTVALUE( nWA, nField, xValue )
-
    LOCAL aWAData    := USRRDD_AREADATA( nWA )
    LOCAL oRecordSet := aWAData[ WA_RECORDSET ]
+   LOCAL oStream, nType
 
-   IF !aWAData[ WA_EOF ] .AND. !( oRecordSet:Fields( nField - 1 ) :Value == xValue )
-      oRecordSet:Fields( nField - 1 ) :Value := xValue
-       // ADO_PUTVALUE agora apenas armazena em cache (modo Batch)
-      // O salvamento final (Update) ocorrerá no ADO_UNLOCK ou ADO_FLUSH
-      //BEGIN SEQUENCE WITH {| oErr | Break( oErr ) }
-      //   oRecordSet:Update()
-      //RECOVER
-      //END SEQUENCE
+   IF !aWAData[ WA_EOF ] .AND. !( oRecordSet:Fields( nField - 1 ):Value == xValue )
+      nType := oRecordSet:Fields( nField - 1 ):Type
+      
+      // Se for Binário ou Memo Extenso (adLongVarBinary, adLongVarChar)
+      //IF nType == 201 .OR. nType == 203 .OR. nType == 205 .OR. nType == 128
+      IF nType == adLongVarChar .OR. nType == adLongVarWChar .OR. nType == adLongVarBinary .OR. nType == adBinary
+         oStream := win_oleCreateObject( "ADODB.Stream" )
+         oStream:Type := 1 // adTypeBinary
+         oStream:Open()
+         oStream:Write( xValue )
+         oStream:Position := 0
+         oRecordSet:Fields( nField - 1 ):Value := oStream:Read()
+         oStream:Close()
+      ELSE
+         oRecordSet:Fields( nField - 1 ):Value := xValue
+      ENDIF
    ENDIF
 
    RETURN HB_SUCCESS
@@ -1121,15 +1142,21 @@ STATIC FUNCTION ADO_ORDLSTFOCUS( nWA, aOrderInfo )
    ENDIF
 
    BEGIN SEQUENCE WITH {| oErr | Break( oErr ) }
+      // Tenta acionar como índice físico
       oRecordSet:Index := cIndexName
       aOrderInfo[ UR_ORI_RESULT ] := aOrderInfo[ UR_ORI_TAG ]
    RECOVER
-      aOrderInfo[ UR_ORI_RESULT ] := 0
-      RETURN HB_FAILURE
+      BEGIN SEQUENCE WITH {| oErr | Break( oErr ) }
+         // Fallback: Ordenação em memória baseada no nome do índice (Client-Side)
+         oRecordSet:Sort := cIndexName + " ASC"
+         aOrderInfo[ UR_ORI_RESULT ] := aOrderInfo[ UR_ORI_TAG ]
+      RECOVER
+         aOrderInfo[ UR_ORI_RESULT ] := 0
+         RETURN HB_FAILURE
+      END SEQUENCE
    END SEQUENCE
 
    RETURN HB_SUCCESS
-
 
 // +--------------------------------------------------------------------
 // +
@@ -2495,6 +2522,8 @@ STATIC FUNCTION ADO_OPEN( nWA, aOpenInfo )
       aWAData[ WA_SERVER ]     := t_cServer
       aWAData[ WA_ENGINE ]     := t_cEngine
       aWAData[ WA_CONNOPEN ]   := .T.
+      aWAData[ WA_CONNECTION ]:ConnectionTimeout := 15
+      aWAData[ WA_CONNECTION ]:CommandTimeout    := 200
 
       // Aciona a Fábrica de Conexões internalizada
       cConnString := ADO_BUILD_CONNECTION_STRING( cDataBase )
@@ -2542,9 +2571,23 @@ STATIC FUNCTION ADO_OPEN( nWA, aOpenInfo )
       RETURN HB_FAILURE
    ENDIF
 
-   oRecordSet:CursorType     := adOpenDynamic
-   oRecordSet:CursorLocation := adUseClient
-   oRecordSet:LockType       := adLockPessimistic
+   oRecordSet:CursorLocation := adUseClient //3
+
+// Gerenciamento Inteligente de Acesso (Inspirado no ADOUse do adoxb)
+   IF aOpenInfo[ UR_OI_READONLY ]
+      oRecordSet:CursorType := 3 // adOpenStatic
+      oRecordSet:LockType   := 1 // adLockReadOnly
+   ELSEIF aOpenInfo[ UR_OI_SHARED ]
+      oRecordSet:CursorType := 2 // adOpenDynamic
+      oRecordSet:LockType   := 3 // adLockOptimistic
+   ELSE
+      oRecordSet:CursorType := 3 // adOpenStatic
+      oRecordSet:LockType   := 2 // adLockPessimistic
+   ENDIF
+
+   //oRecordSet:CursorType     := adOpenDynamic
+   //oRecordSet:CursorLocation := adUseClient
+   //oRecordSet:LockType       := adLockPessimistic
    
    IF aWAData[ WA_QUERY ] == "SELECT * FROM "
       oRecordSet:Open( aWAData[ WA_QUERY ] + aWAData[ WA_TABLENAME ], aWAData[ WA_CONNECTION ] )
