@@ -838,23 +838,12 @@ STATIC FUNCTION ADO_RECCOUNT( nWA, nRecords )
    RETURN HB_SUCCESS
 
 
-// +--------------------------------------------------------------------
-// +
-// +
-// +
-// +    Static Function ADO_PUTVALUE()
-// +
-// +
-// +
-// +--------------------------------------------------------------------
-// +
-// +
-// +
 STATIC FUNCTION ADO_PUTVALUE( nWA, nField, xValue )
    LOCAL aWAData    := USRRDD_AREADATA( nWA )
    LOCAL oRecordSet := aWAData[ WA_RECORDSET ]
    LOCAL oField     := oRecordSet:Fields( nField - 1 )
    LOCAL nType      := oField:Type
+   LOCAL cLocalEngine := aWAData[ WA_ENGINE ] // Evita ambiguidade com cEngine global/thread
    LOCAL oStream
 
    IF aWAData[ WA_EOF ] .OR. oRecordSet:EOF
@@ -863,17 +852,14 @@ STATIC FUNCTION ADO_PUTVALUE( nWA, nField, xValue )
 
    // 1. Tratamento inteligente para campos Lógicos (.T. / .F.)
    IF ValType( xValue ) == "L"
-     DO CASE
+      DO CASE
       CASE nType == adBoolean
-         // Mantém o booleano nativo (.T. / .F.) para SGBDs que suportam
          
       CASE nType == adSmallInt .OR. nType == adInteger .OR. nType == adTinyInt .OR. nType == adBigInt .OR. nType == adNumeric
-         // Motores que mapeiam lógico como numérico (Oracle, Firebird, etc.)
-         xValue := iif( xValue, 1, 0 )
+         xValue := iif( xValue, 1, 0)
          
       CASE nType == adChar .OR. adVarChar $ Str( nType )
-         // Motores que mapeiam lógico como caractere
-         IF cEngine == "PGSQL" .OR. cEngine == "POSTGRESQL"
+         IF cLocalEngine == "PGSQL" .OR. cLocalEngine == "POSTGRESQL"
             xValue := iif( xValue, "true", "false" )
          ELSE
             xValue := iif( xValue, "T", "F" )
@@ -885,27 +871,32 @@ STATIC FUNCTION ADO_PUTVALUE( nWA, nField, xValue )
    // 2. Tratamento inteligente para Datas (D)
    ELSEIF ValType( xValue ) == "D"
       IF Empty( xValue )
-         xValue := NIL // Converte data vazia do Harbour em NULL para o banco evitar erro de range
+         xValue := NIL 
       ENDIF
    ENDIF
 
-   // 3. Atribuição segura ao Recordset com suporte a Streams (Memo/Binário)
-   IF !( oField:Value == xValue )
-      IF nType == adLongVarChar .OR. nType == adLongVarWChar .OR. nType == adLongVarBinary .OR. nType == adBinary
-         oStream := win_oleCreateObject( "ADODB.Stream" )
-         oStream:Type := 1 // adTypeBinary
-         oStream:Open()
-         oStream:Write( xValue )
-         oStream:Position := 0
-         oField:Value := oStream:Read()
-         oStream:Close()
-      ELSE
-         oField:Value := xValue
+   // 3. Atribuição segura ao Recordset com tratamento de exceção para colunas restritas
+   BEGIN SEQUENCE WITH {| oErr | Break( oErr ) }
+      IF !( oField:Value == xValue )
+         IF nType == adLongVarChar .OR. nType == adLongVarWChar .OR. nType == adLongVarBinary .OR. nType == adBinary
+            oStream := win_oleCreateObject( "ADODB.Stream" )
+            oStream:Type := 1 // adTypeBinary
+            oStream:Open()
+            oStream:Write( xValue )
+            oStream:Position := 0
+            oField:Value := oStream:Read()
+            oStream:Close()
+         ELSE
+            oField:Value := xValue
+         ENDIF
       ENDIF
-   ENDIF
+   RECOVER
+      IF xValue == NIL .AND. ( nType == adDate .OR. nType == adDBDate .OR. nType == adDBTimeStamp )
+         oField:Value := SToD( "19000101" )
+      ENDIF
+   END SEQUENCE
 
    RETURN HB_SUCCESS
-
 
 // +--------------------------------------------------------------------
 // +
@@ -1103,7 +1094,7 @@ STATIC FUNCTION ADO_FIELDNAME( nWA, nField, cFieldName )
 // +
 STATIC FUNCTION ADO_FIELDINFO( nWA, nField, nInfoType, uInfo )
 
-   LOCAL nType, nLen
+   LOCAL nType
    LOCAL oRecordSet := USRRDD_AREADATA( nWA )[ WA_RECORDSET ]
 
    DO CASE
@@ -1403,7 +1394,7 @@ STATIC FUNCTION ADO_LOCATE( nWA, lContinue )
 // +
 // +
 STATIC FUNCTION ADO_CLEARREL( nWA )
-
+   HB_SYMBOL_UNUSED( nWA )
    /*
    LOCAL aWAData := USRRDD_AREADATA( nWA )
    LOCAL nKeys   := 0, cKeyName
@@ -1438,7 +1429,8 @@ STATIC FUNCTION ADO_CLEARREL( nWA )
 // +
 // +
 STATIC FUNCTION ADO_RELAREA( nWA, nRelNo, nRelArea )
-
+   HB_SYMBOL_UNUSED( nWA )
+   HB_SYMBOL_UNUSED( nRelNo )
    /*
    LOCAL aWAData := USRRDD_AREADATA( nWA )
 
@@ -1467,7 +1459,8 @@ STATIC FUNCTION ADO_RELAREA( nWA, nRelNo, nRelArea )
 // +
 // +
 STATIC FUNCTION ADO_RELTEXT( nWA, nRelNo, cExpr )
-
+   HB_SYMBOL_UNUSED( nWA )
+   HB_SYMBOL_UNUSED( nRelNo )
    /*
    LOCAL aWAData := USRRDD_AREADATA( nWA )
 
@@ -1496,6 +1489,8 @@ STATIC FUNCTION ADO_RELTEXT( nWA, nRelNo, cExpr )
 // +
 // +
 STATIC FUNCTION ADO_SETREL( nWA, aRelInfo )
+   HB_SYMBOL_UNUSED( nWA )
+   HB_SYMBOL_UNUSED( aRelInfo )
 
    /*
    LOCAL aWAData  := USRRDD_AREADATA( nWA )
@@ -1997,6 +1992,8 @@ STATIC FUNCTION ADO_RDDINFO( nIndex, cargo )
 
    RETURN xRet
 
+
+
 // +--------------------------------------------------------------------
 // +
 // +    Static Function ADO_INFO()
@@ -2008,20 +2005,19 @@ STATIC FUNCTION ADO_INFO( nWA, nIndex, cargo )
 
    DO CASE
       CASE nIndex == DBI_ISDBF
-         // Informa explicitamente ao Harbour que esta RDD NÃO é DBF
          xRet := .F.
       CASE nIndex == DBI_CANPUTREC
-         // Informa que a RDD suporta gravação
          xRet := .T.
+      // Se DBI_ISANSI não estiver definida em alguma versão antiga do header, evita warning
+      #ifdef DBI_ISANSI
       CASE nIndex == DBI_ISANSI
-         // Bancos relacionais modernos usam padrões ANSI/UTF
          xRet := .T.
+      #endif
       OTHERWISE
          xRet := UR_SUPER_INFO( nWA, nIndex, cargo )
    ENDCASE
 
    RETURN xRet
-
 // +--------------------------------------------------------------------
 // +
 // +
@@ -2117,7 +2113,7 @@ STATIC FUNCTION ADO_GETFIELDTYPE( nADOFieldType )
 // +
 // +
 // +
-// +    Procedure hb_adoSetTable()
+// +    Procedure RDDADOX_SetTable()
 // +
 // +
 // +
@@ -2125,7 +2121,7 @@ STATIC FUNCTION ADO_GETFIELDTYPE( nADOFieldType )
 // +
 // +
 // +
-PROCEDURE hb_adoSetTable( cTableName )
+PROCEDURE RDDADOX_SetTable( cTableName )
 
    t_cTableName := cTableName
    //t_cTableName := AllTrim( cTableName )
@@ -2137,7 +2133,7 @@ PROCEDURE hb_adoSetTable( cTableName )
 // +
 // +
 // +
-// +    Procedure hb_adoSetEngine()
+// +    Procedure RDDADOX_SetEngine()
 // +
 // +
 // +
@@ -2145,7 +2141,7 @@ PROCEDURE hb_adoSetTable( cTableName )
 // +
 // +
 // +
-PROCEDURE hb_adoSetEngine( cEngine )
+PROCEDURE RDDADOX_SetEngine( cEngine )
 
    t_cEngine := cEngine
    
@@ -2158,7 +2154,7 @@ PROCEDURE hb_adoSetEngine( cEngine )
 // +
 // +
 // +
-// +    Procedure hb_adoSetServer()
+// +    Procedure RDDADOX_SetServer()
 // +
 // +
 // +
@@ -2166,7 +2162,7 @@ PROCEDURE hb_adoSetEngine( cEngine )
 // +
 // +
 // +
-PROCEDURE hb_adoSetServer( cServer )
+PROCEDURE RDDADOX_SetServer( cServer )
 
    t_cServer := cServer
 
@@ -2177,7 +2173,7 @@ PROCEDURE hb_adoSetServer( cServer )
 // +
 // +
 // +
-// +    Procedure hb_adoSetUser()
+// +    Procedure RDDADOX_SetUser()
 // +
 // +
 // +
@@ -2185,7 +2181,7 @@ PROCEDURE hb_adoSetServer( cServer )
 // +
 // +
 // +
-PROCEDURE hb_adoSetUser( cUser )
+PROCEDURE RDDADOX_SetUser( cUser )
 
    t_cUserName := cUser
 
@@ -2196,7 +2192,7 @@ PROCEDURE hb_adoSetUser( cUser )
 // +
 // +
 // +
-// +    Procedure hb_adoSetPassword()
+// +    Procedure RDDADOX_SetPassword()
 // +
 // +
 // +
@@ -2204,7 +2200,7 @@ PROCEDURE hb_adoSetUser( cUser )
 // +
 // +
 // +
-PROCEDURE hb_adoSetPassword( cPassword )
+PROCEDURE RDDADOX_SetPassword( cPassword )
 
    t_cPassword := cPassword
 
@@ -2215,7 +2211,7 @@ PROCEDURE hb_adoSetPassword( cPassword )
 // +
 // +
 // +
-// +    Procedure hb_adoSetQuery()
+// +    Procedure RDDADOX_SetQuery()
 // +
 // +
 // +
@@ -2223,7 +2219,7 @@ PROCEDURE hb_adoSetPassword( cPassword )
 // +
 // +
 // +
-PROCEDURE hb_adoSetQuery( cQuery )
+PROCEDURE RDDADOX_SetQuery( cQuery )
 
    hb_default( @cQuery, "SELECT * FROM " )
 
@@ -2236,7 +2232,7 @@ PROCEDURE hb_adoSetQuery( cQuery )
 // +
 // +
 // +
-// +    Procedure hb_adoSetLocateFor()
+// +    Procedure RDDADOX_SetLocateFor()
 // +
 // +
 // +
@@ -2244,7 +2240,7 @@ PROCEDURE hb_adoSetQuery( cQuery )
 // +
 // +
 // +
-PROCEDURE hb_adoSetLocateFor( cLocateFor )
+PROCEDURE RDDADOX_SetLocateFor( cLocateFor )
 
    USRRDD_AREADATA( Select() )[ WA_LOCATEFOR ] := cLocateFor
 
@@ -2257,6 +2253,7 @@ PROCEDURE hb_adoSetLocateFor( cLocateFor )
 // +    Tradutor mestre de expressões Harbour para o Dialeto SQL correto
 // +
 // +--------------------------------------------------------------------
+/*
 STATIC FUNCTION SQLTranslate( cExpr )
 
    // 1. Limpeza nativa de aspas da RDDADOX
@@ -2274,11 +2271,13 @@ STATIC FUNCTION SQLTranslate( cExpr )
    cExpr := ADO_DIALETO_FUNCOES( cExpr, t_cEngine )
 
    RETURN cExpr
+*/   
 
 // +--------------------------------------------------------------------
 // +    Rotinas de Apoio Autocontidas (Baseadas no dbudialeto.prg)
 // +--------------------------------------------------------------------
 
+/*
 STATIC FUNCTION ADO_DIALETO_CONDICIONAIS( cSQLCNV, cEngine )
    cSQLCNV := StrTran( cSQLCNV, ".and.", " AND " )
    cSQLCNV := StrTran( cSQLCNV, ".or.", " OR " )
@@ -2294,7 +2293,9 @@ STATIC FUNCTION ADO_DIALETO_CONDICIONAIS( cSQLCNV, cEngine )
       cSQLCNV := StrTran( cSQLCNV, "<>", " != " )
    ENDCASE
    RETURN cSQLCNV
+*/   
 
+/*
 STATIC FUNCTION ADO_DIALETO_FUNCOES( cSQLCNV, cEngine )
    DO CASE
    CASE cEngine == "SQLITE"
@@ -2371,7 +2372,9 @@ STATIC FUNCTION ADO_DIALETO_FUNCOES( cSQLCNV, cEngine )
    ENDCASE
 
    RETURN cSQLCNV
+*/
 
+/*
 STATIC FUNCTION ADO_CONVERTER_EMPTY( cSQL, cEngine )
    LOCAL nPos, nInicio, nFim, cCampo, cSubst, lNot, nTamRemover
    
@@ -2400,7 +2403,9 @@ STATIC FUNCTION ADO_CONVERTER_EMPTY( cSQL, cEngine )
       ENDIF
    ENDDO
    RETURN cSQL
+*/
 
+/*
 STATIC FUNCTION ADO_DETECTAR_NEGACAO( cSQL, nPos )
    LOCAL cPrecedente := ""
    LOCAL lNot := .F.
@@ -2413,7 +2418,9 @@ STATIC FUNCTION ADO_DETECTAR_NEGACAO( cSQL, nPos )
       lNot := .T.
    ENDIF
    RETURN lNot
-
+*/
+   
+/*
 STATIC FUNCTION ADO_GERAR_FRAGMENTO_SQL(cCampo, lNot, cEngine)
    LOCAL cRet := ""
    IF lNot
@@ -2432,12 +2439,13 @@ STATIC FUNCTION ADO_GERAR_FRAGMENTO_SQL(cCampo, lNot, cEngine)
       ENDCASE
    ENDIF
    RETURN cRet
+*/
 
 // +--------------------------------------------------------------------
 // +
 // +
 // +
-// +    Function hb_RDDADOXGetConnection()
+// +    Function RDDADOX_GetConnection()
 // +
 // +
 // +
@@ -2445,7 +2453,7 @@ STATIC FUNCTION ADO_GERAR_FRAGMENTO_SQL(cCampo, lNot, cEngine)
 // +
 // +
 // +
-FUNCTION hb_RDDADOXGetConnection( nWA )
+FUNCTION RDDADOX_GetConnection( nWA )
 
    IF !HB_ISNUMERIC( nWA )
       nWA := SELECT ()
@@ -2458,7 +2466,7 @@ FUNCTION hb_RDDADOXGetConnection( nWA )
 // +
 // +
 // +
-// +    Function hb_RDDADOXGetCatalog()
+// +    Function RDDADOX_GetCatalog()
 // +
 // +
 // +
@@ -2466,7 +2474,7 @@ FUNCTION hb_RDDADOXGetConnection( nWA )
 // +
 // +
 // +
-FUNCTION hb_RDDADOXGetCatalog( nWA )
+FUNCTION RDDADOX_GetCatalog( nWA )
 
    IF !HB_ISNUMERIC( nWA )
       nWA := SELECT ()
@@ -2479,7 +2487,7 @@ FUNCTION hb_RDDADOXGetCatalog( nWA )
 // +
 // +
 // +
-// +    Function hb_RDDADOXGetRecordSet()
+// +    Function RDDADOX_GetRecordSet()
 // +
 // +
 // +
@@ -2487,7 +2495,7 @@ FUNCTION hb_RDDADOXGetCatalog( nWA )
 // +
 // +
 // +
-FUNCTION hb_RDDADOXGetRecordSet( nWA )
+FUNCTION RDDADOX_GetRecordSet( nWA )
 
    LOCAL aWAData
 
@@ -2570,7 +2578,7 @@ STATIC FUNCTION ADO_DIALETO_ROLLBACK( cEngine )
 // +--------------------------------------------------------------------
 
 STATIC FUNCTION ADO_TRANSBEGIN( nWA )
-   LOCAL oConn := hb_RDDADOXGetConnection( nWA )
+   LOCAL oConn := RDDADOX_GetConnection( nWA )
    IF oConn:State != adStateClosed
       BEGIN SEQUENCE WITH {| oErr | Break( oErr ) }
          oConn:Execute( ADO_DIALETO_BEGIN( t_cEngine ) )
@@ -2582,7 +2590,7 @@ STATIC FUNCTION ADO_TRANSBEGIN( nWA )
    RETURN HB_SUCCESS
 
 STATIC FUNCTION ADO_TRANSCOMMIT( nWA )
-   LOCAL oConn := hb_RDDADOXGetConnection( nWA )
+   LOCAL oConn := RDDADOX_GetConnection( nWA )
    IF oConn:State != adStateClosed
       BEGIN SEQUENCE WITH {| oErr | Break( oErr ) }
          oConn:Execute( ADO_DIALETO_COMMIT( t_cEngine ) )
@@ -2593,7 +2601,7 @@ STATIC FUNCTION ADO_TRANSCOMMIT( nWA )
    RETURN HB_SUCCESS
 
 STATIC FUNCTION ADO_TRANSROLLBACK( nWA )
-   LOCAL oConn := hb_RDDADOXGetConnection( nWA )
+   LOCAL oConn := RDDADOX_GetConnection( nWA )
    IF oConn:State != adStateClosed
       BEGIN SEQUENCE WITH {| oErr | Break( oErr ) }
          oConn:Execute( ADO_DIALETO_ROLLBACK( t_cEngine ) )

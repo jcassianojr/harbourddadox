@@ -1,21 +1,25 @@
--hblib
--inc
 
-#-olib/${hb_plat}/${hb_comp}/${hb_name}
-#-o${hb_lib}/${hb_plat}/${hb_comp}/${hb_name}
+-o${hb_name}
+
+
+# Nome da biblioteca de saída
 -olib/${hb_plat}/${hb_comp}/${hb_name}
 
-#-w3 -es2
+{!xhb}-hbx=rddadox.hbx
+{!xhb}rddadox.hbx
 
--stop{!win}
+
+# Modo biblioteca
+-hblib
+#-inc
+
+# Configurações de compilação (equivalentes aos parâmetros do .bat)
+-n -w2 -gc0
+
+xhb.hbc
 
 rddadox.prg
 
--hbx=${hb_name}.hbx
-${hb_name}.hbx
-{hbdyn}-env:_HB_DYNSUFF=_dll
-{hbdyn}hbwin.hbc
-$hb_pkg_dynlib.hbm
 
-# disable this line to NOT INSTALL the library in addons
+
 $hb_pkg_install.hbm
