@@ -50,6 +50,7 @@ THREAD STATIC t_cServer
 THREAD STATIC t_cUserName
 THREAD STATIC t_cPassword
 THREAD STATIC t_cQuery := ""
+THREAD STATIC t_lLoadBlobs := .F. // Por padrão, o RDD NÃO baixa imagens na RAM
 
 
 // +--------------------------------------------------------------------
@@ -456,20 +457,14 @@ STATIC FUNCTION ADO_CLOSE( nWA )
 
 // +--------------------------------------------------------------------
 // +
-// +
-// +
 // +    Static Function ADO_GETVALUE()
-// +
-// +
-// +
+// +    Leitura com saneamento de Nulos, Lógicos, Datas 
+// +    e extração de BLOBs/Imagens nativamente (GetChunk).
 // +--------------------------------------------------------------------
-// +
-// +
-// +
 STATIC FUNCTION ADO_GETVALUE( nWA, nField, xValue )
    LOCAL aWAData := USRRDD_AREADATA( nWA )
    LOCAL rs      := aWAData[ WA_RECORDSET ]
-   LOCAL nType
+   LOCAL nTypeADO, nType
 
    IF aWAData[ WA_EOF ] .OR. rs:EOF .OR. rs:BOF
       xValue := NIL
@@ -487,8 +482,26 @@ STATIC FUNCTION ADO_GETVALUE( nWA, nField, xValue )
          xValue := ""
       ENDCASE
    ELSE
-      xValue := rs:Fields( nField - 1 ):Value
-      nType  := ADO_GETFIELDTYPE( rs:Fields( nField - 1 ):Type )
+      nTypeADO := rs:Fields( nField - 1 ):Type
+      
+      // Tratamento Universal de BLOBs (Imagens / Arquivos)
+      IF nTypeADO == adLongVarBinary .OR. nTypeADO == adVarBinary .OR. nTypeADO == adBinary 
+         IF t_lLoadBlobs
+            BEGIN SEQUENCE WITH {| oErr | Break( oErr ) }
+               // Download real do Chunk de bytes na memória
+               xValue := rs:Fields( nField - 1 ):GetChunk( rs:Fields( nField - 1 ):ActualSize )
+            RECOVER
+               xValue := rs:Fields( nField - 1 ):Value 
+            END SEQUENCE
+         ELSE
+            // Blindagem: Retorna apenas um marcador leve para o Harbour
+            xValue := "<IMAGEM/BLOB>"
+         ENDIF
+      ELSE
+         xValue := rs:Fields( nField - 1 ):Value
+      ENDIF
+
+      nType := ADO_GETFIELDTYPE( nTypeADO )
 
       IF ValType( xValue ) == "U" // Retorno NULL do Banco de Dados
          DO CASE
@@ -507,9 +520,10 @@ STATIC FUNCTION ADO_GETVALUE( nWA, nField, xValue )
          // Filtro Inteligente para Campos Lógicos
          IF nType == HB_FT_LOGICAL .AND. ValType( xValue ) != "L"
             xValue := strlogicrdd( hb_ValToStr( xValue ), .F. )
-         // Filtro Inteligente para Campos de Data (Garante conversão via StrDateRdd se vier como string/timestamp irregular)
-         ELSEIF  nType == HB_FT_DATE   .AND. ValType( xValue ) != "D"
-            xValue := StrDateRdd( xValue )   
+         
+         // Filtro Inteligente para Campos de Data (Garante conversão se vier como string irregular)
+         ELSEIF ( nType == HB_FT_DATE .OR. nType == HB_FT_TIMESTAMP ) .AND. ValType( xValue ) != "D"
+            xValue := StrDateRdd( xValue )
          
          // Tratamento de tamanho para String válida
          ELSEIF nType == HB_FT_STRING
@@ -517,6 +531,109 @@ STATIC FUNCTION ADO_GETVALUE( nWA, nField, xValue )
          ENDIF
       ENDIF
    ENDIF
+
+   RETURN HB_SUCCESS
+
+
+// +--------------------------------------------------------------------
+// +
+// +    Static Function ADO_PUTVALUE()
+// +    Gravação com CHECAGEM DUPLA (Tipagem ADO + Engine SGBD) para Lógicos,
+// +    tratamento de Datas NULL e Streams binários (BLOB/Imagens) nativos.
+// +    INCLUI BLINDAGEM LAZY LOADING para evitar corrupção de imagens.
+// +--------------------------------------------------------------------
+STATIC FUNCTION ADO_PUTVALUE( nWA, nField, xValue )
+   LOCAL aWAData    := USRRDD_AREADATA( nWA )
+   LOCAL oRecordSet := aWAData[ WA_RECORDSET ]
+   LOCAL oField     := oRecordSet:Fields( nField - 1 )
+   LOCAL nType      := oField:Type
+   LOCAL cEngine    := aWAData[ WA_ENGINE ]
+   LOCAL oStream
+
+   IF aWAData[ WA_EOF ] .OR. oRecordSet:EOF
+      RETURN HB_SUCCESS
+   ENDIF
+
+   // 1. Tratamento Rigoroso com Checagem Dupla para Lógicos (L)
+   IF ValType( xValue ) == "L"
+      
+      DO CASE
+      // Coluna nativamente Booleana (Ex: Access, SQL Server, DuckDB)
+      CASE nType == adBoolean
+         // Mantém o valor lógico nativo do Harbour (.T. / .F.)
+         // O driver OLEDB/ODBC cuidará da injeção corretamente.
+         
+      // Coluna mapeada como Numérica (Ex: Oracle, Firebird, MySQL, SQLite)
+      CASE nType == adSmallInt .OR. nType == adInteger .OR. nType == adTinyInt .OR. nType == adBigInt .OR. nType == adNumeric
+         xValue := iif( xValue, 1, 0 )
+         
+      // Coluna mapeada como Texto/String (Ex: PostgreSQL, Informix, ou DBF migrado para CHAR)
+      CASE nType == adChar .OR. nType == adVarChar .OR. nType == adWChar .OR. nType == adVarWChar
+         // Double-check de Engine para decidir a sintaxe do texto
+         IF cEngine $ "PGSQL,POSTGRESQL,PGSQL64,INFORMIX"
+            xValue := iif( xValue, "true", "false" )
+         ELSE
+            xValue := iif( xValue, "T", "F" )
+         ENDIF
+         
+      // Fallback de Segurança: Se o ADO não identificar o tipo claramente
+      OTHERWISE
+         DO CASE
+         CASE cEngine $ "MYSQL,MYSQL64,MARIADB,ORACLE,OCI,FIREBIRD,FDB,GDB,IB,SQLITE"
+            xValue := iif( xValue, 1, 0 )
+         CASE cEngine $ "PGSQL,POSTGRESQL,PGSQL64,INFORMIX"
+            xValue := iif( xValue, "true", "false" )
+         OTHERWISE
+            xValue := iif( xValue, 1, 0 ) // Padrão seguro universal
+         ENDCASE
+      ENDCASE
+
+   // 2. Tratamento inteligente para Datas (D)
+   ELSEIF ValType( xValue ) == "D"
+      
+      IF Empty( xValue )
+         // Converte data vazia do Harbour em NIL (NULL) para o banco evitar erro de range
+         xValue := NIL 
+      ELSE
+         // Se for SQLite, força o formato texto ANSI YYYY-MM-DD no OLEDB
+         IF cEngine == "SQLITE"
+            xValue := Transform( DToS( xValue ), "@R 9999-99-99" )
+         ENDIF
+      ENDIF
+      
+   ENDIF
+
+// 3. Atribuição segura ao Recordset com fallback de NOT NULL e Stream para BLOB
+   BEGIN SEQUENCE WITH {| oErr | Break( oErr ) }
+      IF !( oField:Value == xValue )
+         IF nType == adLongVarChar .OR. nType == adLongVarWChar .OR. nType == adLongVarBinary .OR. nType == adBinary
+            
+            // BLINDAGEM LAZY LOADING: Previne que o marcador de texto sobrescreva o BLOB real
+            IF (ValType( xValue ) == "C" .AND. xValue == "<IMAGEM/BLOB>") .OR. .NOT. t_lLoadBlobs
+               // Apenas ignora a atribuição deste campo silenciosamente,
+               // protegendo a imagem no SGBD sem causar erro de compilação.
+            ELSE
+               oStream := win_oleCreateObject( "ADODB.Stream" )
+               oStream:Type := 1 // adTypeBinary
+               oStream:Open()
+               oStream:Write( xValue )
+               oStream:Position := 0
+               oField:Value := oStream:Read()
+               oStream:Close()
+            ENDIF
+
+         ELSE
+            oField:Value := xValue
+         ENDIF
+      ENDIF
+   RECOVER
+      // Se o SGBD rejeitar NIL em colunas NOT NULL de Data, injeta data mínima segura 
+      IF xValue == NIL .AND. ( nType == adDate .OR. nType == adDBDate .OR. nType == adDBTimeStamp )
+         oField:Value := SToD( "19000101" )
+      ENDIF
+   END SEQUENCE
+
+   RETURN HB_SUCCESS
 
    RETURN HB_SUCCESS
 
@@ -838,66 +955,7 @@ STATIC FUNCTION ADO_RECCOUNT( nWA, nRecords )
    RETURN HB_SUCCESS
 
 
-STATIC FUNCTION ADO_PUTVALUE( nWA, nField, xValue )
-   LOCAL aWAData    := USRRDD_AREADATA( nWA )
-   LOCAL oRecordSet := aWAData[ WA_RECORDSET ]
-   LOCAL oField     := oRecordSet:Fields( nField - 1 )
-   LOCAL nType      := oField:Type
-   LOCAL cLocalEngine := aWAData[ WA_ENGINE ] // Evita ambiguidade com cEngine global/thread
-   LOCAL oStream
-
-   IF aWAData[ WA_EOF ] .OR. oRecordSet:EOF
-      RETURN HB_SUCCESS
-   ENDIF
-
-   // 1. Tratamento inteligente para campos Lógicos (.T. / .F.)
-   IF ValType( xValue ) == "L"
-      DO CASE
-      CASE nType == adBoolean
-         
-      CASE nType == adSmallInt .OR. nType == adInteger .OR. nType == adTinyInt .OR. nType == adBigInt .OR. nType == adNumeric
-         xValue := iif( xValue, 1, 0)
-         
-      CASE nType == adChar .OR. adVarChar $ Str( nType )
-         IF cLocalEngine == "PGSQL" .OR. cLocalEngine == "POSTGRESQL"
-            xValue := iif( xValue, "true", "false" )
-         ELSE
-            xValue := iif( xValue, "T", "F" )
-         ENDIF
-      OTHERWISE
-         xValue := iif( xValue, 1, 0 )
-      ENDCASE
-
-   // 2. Tratamento inteligente para Datas (D)
-   ELSEIF ValType( xValue ) == "D"
-      IF Empty( xValue )
-         xValue := NIL 
-      ENDIF
-   ENDIF
-
-   // 3. Atribuição segura ao Recordset com tratamento de exceção para colunas restritas
-   BEGIN SEQUENCE WITH {| oErr | Break( oErr ) }
-      IF !( oField:Value == xValue )
-         IF nType == adLongVarChar .OR. nType == adLongVarWChar .OR. nType == adLongVarBinary .OR. nType == adBinary
-            oStream := win_oleCreateObject( "ADODB.Stream" )
-            oStream:Type := 1 // adTypeBinary
-            oStream:Open()
-            oStream:Write( xValue )
-            oStream:Position := 0
-            oField:Value := oStream:Read()
-            oStream:Close()
-         ELSE
-            oField:Value := xValue
-         ENDIF
-      ENDIF
-   RECOVER
-      IF xValue == NIL .AND. ( nType == adDate .OR. nType == adDBDate .OR. nType == adDBTimeStamp )
-         oField:Value := SToD( "19000101" )
-      ENDIF
-   END SEQUENCE
-
-   RETURN HB_SUCCESS
-
+   
 // +--------------------------------------------------------------------
 // +
 // +
@@ -2247,6 +2305,45 @@ PROCEDURE RDDADOX_SetLocateFor( cLocateFor )
    RETURN
 
 
+FUNCTION RDDADOX_PegarBlobJpg( cCampoImagem, cCaminhoJpg )
+   LOCAL cBinario, lEstadoAnterior
+   
+   // Guarda o estado atual e força a liberação de download de BLOBs
+   lEstadoAnterior := t_lLoadBlobs
+   RDDADOX_SetLoadBlobs( .T. )
+   
+   // Agora o FieldGet fará o download real via GetChunk
+   cBinario := FieldGet( FieldPos( cCampoImagem ) )
+   
+   // Restaura a blindagem imediatamente após o download
+   RDDADOX_SetLoadBlobs( lEstadoAnterior )
+   
+   IF Empty( cBinario ) .OR. cBinario == "<IMAGEM/BLOB>" .OR. ValType( cBinario ) != "C"
+      RETURN .F.
+   ENDIF
+   
+   RETURN hb_memowrit( cCaminhoJpg, cBinario )
+   
+FUNCTION RDDADOX_GravarBlobJpg( cCampoImagem, cCaminhoJpg )
+   LOCAL cBinario, lEstadoAnterior
+   
+   IF !hb_FileExists( cCaminhoJpg )
+      RETURN .F.
+   ENDIF
+   
+   cBinario := hb_memoread( cCaminhoJpg )
+   
+   // ABRINDO A PORTA DO COFRE PARA GRAVAÇÃO
+   lEstadoAnterior := t_lLoadBlobs
+   RDDADOX_SetLoadBlobs( .T. )
+   
+   FieldPut( FieldPos( cCampoImagem ), cBinario )
+   
+   // FECHANDO A PORTA DO COFRE
+   RDDADOX_SetLoadBlobs( lEstadoAnterior )
+   
+   RETURN .T. 
+
 // +--------------------------------------------------------------------
 // +
 // +    Static Function SQLTranslate()
@@ -3047,3 +3144,8 @@ STATIC FUNCTION StrDateRdd( xData )
    ENDIF
 
    RETURN dRet
+   
+   
+   PROCEDURE RDDADOX_SetLoadBlobs( lLoad )
+   t_lLoadBlobs := lLoad
+   RETURN
