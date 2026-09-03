@@ -51,7 +51,7 @@ THREAD STATIC t_cUserName
 THREAD STATIC t_cPassword
 THREAD STATIC t_cQuery := ""
 THREAD STATIC t_lLoadBlobs := .F. // Por padrão, o RDD NÃO baixa imagens na RAM
-
+THREAD STATIC t_lLoadMemos := .F. // Por padrão, o RDD NÃO baixa textos longos (MEMO) na RAM
 
 // +--------------------------------------------------------------------
 // +
@@ -497,10 +497,20 @@ STATIC FUNCTION ADO_GETVALUE( nWA, nField, xValue )
             // Blindagem: Retorna apenas um marcador leve para o Harbour
             xValue := "<IMAGEM/BLOB>"
          ENDIF
+      
+      // Tratamento Universal de MEMOs (Textos Longos)
+      ELSEIF nTypeADO == adLongVarChar .OR. nTypeADO == adLongVarWChar
+         IF t_lLoadMemos
+            xValue := rs:Fields( nField - 1 ):Value
+         ELSE
+            xValue := "<MEMO>"
+         ENDIF
+      
+      // Tipos Convencionais
       ELSE
          xValue := rs:Fields( nField - 1 ):Value
       ENDIF
-
+      
       nType := ADO_GETFIELDTYPE( nTypeADO )
 
       IF ValType( xValue ) == "U" // Retorno NULL do Banco de Dados
@@ -603,15 +613,15 @@ STATIC FUNCTION ADO_PUTVALUE( nWA, nField, xValue )
       
    ENDIF
 
+
 // 3. Atribuição segura ao Recordset com fallback de NOT NULL e Stream para BLOB
    BEGIN SEQUENCE WITH {| oErr | Break( oErr ) }
       IF !( oField:Value == xValue )
-         IF nType == adLongVarChar .OR. nType == adLongVarWChar .OR. nType == adLongVarBinary .OR. nType == adBinary
-            
-            // BLINDAGEM LAZY LOADING: Previne que o marcador de texto sobrescreva o BLOB real
+         
+         // A. BLINDAGEM LAZY LOADING: BLOB
+         IF nType == adLongVarBinary .OR. nType == adBinary .OR. nType == adVarBinary
             IF (ValType( xValue ) == "C" .AND. xValue == "<IMAGEM/BLOB>") .OR. .NOT. t_lLoadBlobs
-               // Apenas ignora a atribuição deste campo silenciosamente,
-               // protegendo a imagem no SGBD sem causar erro de compilação.
+               // Aborta silenciosamente
             ELSE
                oStream := win_oleCreateObject( "ADODB.Stream" )
                oStream:Type := 1 // adTypeBinary
@@ -622,6 +632,15 @@ STATIC FUNCTION ADO_PUTVALUE( nWA, nField, xValue )
                oStream:Close()
             ENDIF
 
+         // B. BLINDAGEM LAZY LOADING: MEMO
+         ELSEIF nType == adLongVarChar .OR. nType == adLongVarWChar
+            IF (ValType( xValue ) == "C" .AND. xValue == "<MEMO>") .OR. .NOT. t_lLoadMemos
+               // Aborta silenciosamente
+            ELSE
+               oField:Value := xValue
+            ENDIF
+
+         // C. TIPOS CONVENCIONAIS
          ELSE
             oField:Value := xValue
          ENDIF
@@ -3149,3 +3168,42 @@ STATIC FUNCTION StrDateRdd( xData )
    PROCEDURE RDDADOX_SetLoadBlobs( lLoad )
    t_lLoadBlobs := lLoad
    RETURN
+   
+   
+   // Adicione esta rotina junto com RDDADOX_SetLoadBlobs
+   PROCEDURE RDDADOX_SetLoadMemos( lLoad )
+   t_lLoadMemos := lLoad
+   RETURN
+   
+   
+   FUNCTION RDDADOX_PegarMemo( cCampoMemo )
+   LOCAL cTexto, lEstadoAnterior
+   
+   lEstadoAnterior := t_lLoadMemos
+   RDDADOX_SetLoadMemos( .T. )
+   
+   cTexto := FieldGet( FieldPos( cCampoMemo ) )
+   
+   RDDADOX_SetLoadMemos( lEstadoAnterior )
+   
+   IF Empty( cTexto ) .OR. cTexto == "<MEMO>"
+      RETURN ""
+   ENDIF
+   
+   RETURN cTexto
+   
+FUNCTION RDDADOX_GravarMemo( cCampoMemo, cTexto )
+   LOCAL lEstadoAnterior
+   
+   IF ValType( cTexto ) != "C"
+      RETURN .F.
+   ENDIF
+   
+   lEstadoAnterior := t_lLoadMemos
+   RDDADOX_SetLoadMemos( .T. )
+   
+   FieldPut( FieldPos( cCampoMemo ), cTexto )
+   
+   RDDADOX_SetLoadMemos( lEstadoAnterior )
+   
+   RETURN .T.
