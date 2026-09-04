@@ -654,8 +654,6 @@ STATIC FUNCTION ADO_PUTVALUE( nWA, nField, xValue )
 
    RETURN HB_SUCCESS
 
-   RETURN HB_SUCCESS
-
 // +--------------------------------------------------------------------
 // +
 // +
